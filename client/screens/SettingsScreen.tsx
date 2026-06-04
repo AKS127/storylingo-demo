@@ -22,7 +22,7 @@ import { useSubscription } from '@/context/SubscriptionContext';
 import { StoryBuddyColors, Spacing, BorderRadius, Typography } from '@/constants/theme';
 import type { RootStackParamList } from '@/navigation/RootStackNavigator';
 
-const DEV_PASSWORD = '3268';
+const DEV_PASSWORD = '1234';
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
