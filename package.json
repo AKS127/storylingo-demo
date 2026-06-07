@@ -21,6 +21,7 @@
     "format": "prettier --write \"**/*.{js,ts,tsx,css,json}\""
   },
   "dependencies": {
+    "esbuild": "^0.25.0",
     "@expo-google-fonts/fredoka-one": "^0.2.3",
     "@expo-google-fonts/nunito": "^0.4.2",
     "@expo/vector-icons": "^15.0.2",
