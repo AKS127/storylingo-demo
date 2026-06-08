@@ -86,7 +86,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           body: JSON.stringify({
             session: {
               type: "realtime",
-              model: "gpt-4o-realtime-preview",
+              model: "gpt-realtime",
               prompt: {
                 id: langConfig.promptId,
                 variables: {
