@@ -479,11 +479,23 @@ export default function SessionScreen() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // Wait for ICE gathering to complete so the SDP includes all candidates
+      await new Promise<void>((resolve) => {
+        if (pc.iceGatheringState === "complete") {
+          resolve();
+        } else {
+          pc.onicegatheringstatechange = () => {
+            if (pc.iceGatheringState === "complete") resolve();
+          };
+          // Fallback timeout in case gathering stalls
+          setTimeout(resolve, 3000);
+        }
+      });
+
       // Step 3: Exchange SDP with OpenAI Realtime API
-      // Using the correct GA endpoint: /v1/realtime/calls
       const sdpResponse = await fetch("https://api.openai.com/v1/realtime?model=gpt-5.5", {
         method: "POST",
-        body: offer.sdp,
+        body: pc.localDescription?.sdp ?? offer.sdp,
         headers: {
           Authorization: `Bearer ${client_secret}`,
           "Content-Type": "application/sdp",
