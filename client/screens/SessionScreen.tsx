@@ -132,10 +132,12 @@ export default function SessionScreen() {
 
   const { addSession, markStoryCompleted, saveTranscript } = useProgress();
 
-  const pcRef = useRef<any>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const dataChannelRef = useRef<any>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const nextAudioTimeRef = useRef<number>(0);
+  const isSendingAudioRef = useRef<boolean>(false);
 
   const transcriptRef = useRef<ConversationMessage[]>([]);
   const currentAITextRef = useRef<string>('');
@@ -145,15 +147,14 @@ export default function SessionScreen() {
   const pulseScale = useSharedValue(1);
   const glowOpacity = useSharedValue(0);
 
-  // Cleanup on unmount only (connection is started by user tap)
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (pcRef.current) {
-        pcRef.current.close();
-      }
-      if (listenIntervalRef.current) {
-        clearInterval(listenIntervalRef.current);
-      }
+      if (wsRef.current) wsRef.current.close();
+      if (scriptProcessorRef.current) scriptProcessorRef.current.disconnect();
+      if (audioContextRef.current) audioContextRef.current.close();
+      if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
+      if (listenIntervalRef.current) clearInterval(listenIntervalRef.current);
     };
   }, []);
 
@@ -240,12 +241,36 @@ export default function SessionScreen() {
     opacity: glowOpacity.value,
   }));
 
+  // Decode base64 PCM16 and schedule playback via AudioContext
+  const playAudioChunk = useCallback((base64: string) => {
+    const audioCtx = audioContextRef.current;
+    if (!audioCtx) return;
+    try {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const int16 = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+      const buffer = audioCtx.createBuffer(1, float32.length, 24000);
+      buffer.copyToChannel(float32, 0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(audioCtx.destination);
+      const now = audioCtx.currentTime;
+      if (nextAudioTimeRef.current < now) nextAudioTimeRef.current = now;
+      src.start(nextAudioTimeRef.current);
+      nextAudioTimeRef.current += buffer.duration;
+    } catch (e) {
+      console.error("Audio decode error:", e);
+    }
+  }, []);
+
   const connectToRealtimeWeb = useCallback(async () => {
     try {
       setStatus("connecting");
 
       // Step 1: Get ephemeral token from our backend
-      // Pass story variables that will be injected into the OpenAI prompt template
       const baseUrl = getApiUrl();
       const tokenUrl = new URL("/api/token", baseUrl);
       const response = await fetch(tokenUrl.toString(), {
@@ -262,202 +287,18 @@ export default function SessionScreen() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await response.json().catch(() => ({}));
         console.error("Token error:", errorData);
         throw new Error("Failed to get token");
       }
 
       const { client_secret } = await response.json();
 
-      // Step 2: Create WebRTC peer connection (web only)
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
-
-      // Set up audio element to play remote audio
-      const audioEl = document.createElement("audio");
-      audioEl.autoplay = true;
-      audioRef.current = audioEl;
-
-      pc.ontrack = (e) => {
-        audioEl.srcObject = e.streams[0];
-      };
-
-      // Create data channel for events BEFORE creating SDP offer
-      const dc = pc.createDataChannel("oai-events");
-      dataChannelRef.current = dc;
-      dc.onopen = () => {
-        console.log("Data channel opened");
-        
-        // Automatically initiate the story by sending a message to the AI
-        // This tells the AI which story was selected, language preference, and to greet the child
-        const storyTranslation = getStoryTranslation(t, story.id);
-        const languageInstruction = t.voiceAgent.languageInstruction;
-        const initiationMessage = t.voiceAgent.initiationMessage
-          .replace(/{storyTitle}/g, storyTranslation.title)
-          .replace(/{languageInstruction}/g, languageInstruction);
-        
-        // Send a conversation item with the story initiation
-        const createItemEvent = {
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: initiationMessage,
-              },
-            ],
-          },
-        };
-        dc.send(JSON.stringify(createItemEvent));
-        console.log("Sent story initiation:", initiationMessage);
-        
-        // Trigger the AI to respond
-        const responseEvent = {
-          type: "response.create",
-        };
-        dc.send(JSON.stringify(responseEvent));
-        console.log("Triggered AI response");
-
-        // Configure VAD to be less sensitive to background noise
-        // threshold 0.7 (default 0.5) = only trigger on clear intentional speech
-        // silence_duration_ms 800 = wait longer before treating silence as end of turn
-        dc.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.85,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 1000,
-            },
-            input_audio_transcription: {
-              model: "gpt-4o-mini-transcribe",
-            },
-          },
-        }));
-        console.log("VAD config + transcription applied");
-
-        transcriptRef.current = [];
-        currentAITextRef.current = '';
-        userTurnCountRef.current = 0;
-        addSession(story.id);
-      };
-      dc.onmessage = (msgEvent) => {
-        try {
-          const data = JSON.parse(msgEvent.data);
-          console.log("OpenAI event:", data.type);
-
-          if (data.type === "response.audio_transcript.delta") {
-            currentAITextRef.current += data.delta || '';
-            setStatus("speaking");
-            if (localStreamRef.current) {
-              localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = false; });
-            }
-            setIsMuted(true);
-            stopPulseAnimation();
-            if (dataChannelRef.current?.readyState === "open") {
-              dataChannelRef.current.send(JSON.stringify({
-                type: "session.update",
-                session: { turn_detection: null },
-              }));
-              dataChannelRef.current.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            }
-          } else if (data.type === "response.audio.delta") {
-            setStatus("speaking");
-            if (localStreamRef.current) {
-              localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = false; });
-            }
-            setIsMuted(true);
-            stopPulseAnimation();
-            if (dataChannelRef.current?.readyState === "open") {
-              dataChannelRef.current.send(JSON.stringify({
-                type: "session.update",
-                session: { turn_detection: null },
-              }));
-              dataChannelRef.current.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-            }
-          } else if (data.type === "response.done") {
-            if (currentAITextRef.current.trim()) {
-              transcriptRef.current.push({
-                role: 'ai',
-                text: currentAITextRef.current.trim(),
-                timestamp: Date.now(),
-              });
-              currentAITextRef.current = '';
-            }
-            setStatus("listening");
-            setIsMuted(true);
-            startPulseAnimation();
-            if (dataChannelRef.current?.readyState === "open") {
-              dataChannelRef.current.send(JSON.stringify({
-                type: "session.update",
-                session: { turn_detection: null },
-              }));
-            }
-          } else if (data.type === "conversation.item.input_audio_transcription.completed") {
-            const transcript = data.transcript?.trim();
-            if (transcript) {
-              transcriptRef.current.push({
-                role: 'user',
-                text: transcript,
-                timestamp: Date.now(),
-              });
-              userTurnCountRef.current += 1;
-              if (userTurnCountRef.current >= 8) {
-                markStoryCompleted(story.id);
-              }
-            }
-          } else if (data.type === "session.created") {
-            console.log("Session created successfully");
-          } else if (data.type === "error") {
-            console.error("OpenAI error:", data.error);
-          }
-        } catch (e) {
-          // Non-JSON message, ignore
-        }
-      };
-      dc.onerror = (error) => {
-        console.error("Data channel error:", error);
-      };
-      dc.onclose = () => {
-        console.log("Data channel closed");
-        setIsSessionActive(false);
-        setStatus("error");
-        stopPulseAnimation();
-      };
-
-      // Monitor connection state
-      pc.onconnectionstatechange = () => {
-        console.log("Connection state:", pc.connectionState);
-        if (pc.connectionState === "connected") {
-          setStatus("listening");
-          setIsSessionActive(true);
-          startPulseAnimation();
-        } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
-          setIsSessionActive(false);
-          setStatus("error");
-          stopPulseAnimation();
-        }
-      };
-
-      // Monitor ICE connection state
-      pc.oniceconnectionstatechange = () => {
-        console.log("ICE state:", pc.iceConnectionState);
-        if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
-          setIsSessionActive(false);
-          setStatus("error");
-          stopPulseAnimation();
-        }
-      };
-
-      // Get local audio stream — must be called within a user gesture
+      // Step 2: Microphone access
       let ms: MediaStream;
       try {
         ms = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (micError: any) {
-        pc.close();
         setStatus("idle");
         const isDenied = micError?.name === "NotAllowedError" || micError?.name === "PermissionDeniedError";
         Alert.alert(
@@ -470,59 +311,132 @@ export default function SessionScreen() {
         return;
       }
       localStreamRef.current = ms;
-      ms.getTracks().forEach((track) => {
-        track.enabled = false; // Muted by default until AI finishes speaking
-        pc.addTrack(track, ms);
-      });
 
-      // Create offer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+      // Step 3: AudioContext for mic capture (PCM16 @ 24kHz) and audio playback
+      const audioCtx = new (window.AudioContext as any)({ sampleRate: 24000 });
+      audioContextRef.current = audioCtx;
+      nextAudioTimeRef.current = 0;
 
-      // Wait for ICE gathering to complete so the SDP includes all candidates
-      await new Promise<void>((resolve) => {
-        if (pc.iceGatheringState === "complete") {
-          resolve();
-        } else {
-          pc.onicegatheringstatechange = () => {
-            if (pc.iceGatheringState === "complete") resolve();
-          };
-          // Fallback timeout in case gathering stalls
-          setTimeout(resolve, 3000);
+      const source = audioCtx.createMediaStreamSource(ms);
+      const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+      scriptProcessorRef.current = processor;
+      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+        if (!isSendingAudioRef.current) return;
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const float32 = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          int16[i] = Math.max(-32768, Math.min(32767, Math.round(float32[i] * 32767)));
         }
-      });
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(int16.buffer)));
+        ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64 }));
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
 
-      // Step 3: Exchange SDP with OpenAI Realtime API
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime?model=gpt-realtime", {
-        method: "POST",
-        body: pc.localDescription?.sdp ?? offer.sdp,
-        headers: {
-          Authorization: `Bearer ${client_secret}`,
-          "Content-Type": "application/sdp",
-        },
-      });
+      // Step 4: Connect via server-side WebSocket proxy
+      const wsUrl = new URL("/api/realtime", baseUrl);
+      wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl.searchParams.set("token", client_secret);
 
-      if (!sdpResponse.ok) {
-        const errorText = await sdpResponse.text();
-        console.error("WebRTC error:", errorText);
-        throw new Error("Failed to establish WebRTC connection");
-      }
+      const ws = new WebSocket(wsUrl.toString());
+      wsRef.current = ws;
 
-      const answerSdp = await sdpResponse.text();
-      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      ws.onopen = () => {
+        console.log("WebSocket connected");
 
-      // Connection handshake complete - status will update via onconnectionstatechange
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        // Disable VAD by default — push-to-talk only
+        ws.send(JSON.stringify({
+          type: "session.update",
+          session: {
+            turn_detection: null,
+            input_audio_format: "pcm16",
+            output_audio_format: "pcm16",
+            input_audio_transcription: { model: "whisper-1" },
+          },
+        }));
+
+        // Initiate story
+        const storyTranslation = getStoryTranslation(t, story.id);
+        const languageInstruction = t.voiceAgent.languageInstruction;
+        const initiationMessage = t.voiceAgent.initiationMessage
+          .replace(/{storyTitle}/g, storyTranslation.title)
+          .replace(/{languageInstruction}/g, languageInstruction);
+
+        ws.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: { type: "message", role: "user", content: [{ type: "input_text", text: initiationMessage }] },
+        }));
+        ws.send(JSON.stringify({ type: "response.create" }));
+
+        transcriptRef.current = [];
+        currentAITextRef.current = "";
+        userTurnCountRef.current = 0;
+        addSession(story.id);
+        setStatus("listening");
+        setIsSessionActive(true);
+        startPulseAnimation();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === "response.audio.delta") {
+            playAudioChunk(data.delta);
+            setStatus("speaking");
+            isSendingAudioRef.current = false;
+            setIsMuted(true);
+            stopPulseAnimation();
+          } else if (data.type === "response.audio_transcript.delta") {
+            currentAITextRef.current += data.delta || "";
+            setStatus("speaking");
+            isSendingAudioRef.current = false;
+            setIsMuted(true);
+            stopPulseAnimation();
+          } else if (data.type === "response.done") {
+            if (currentAITextRef.current.trim()) {
+              transcriptRef.current.push({ role: "ai", text: currentAITextRef.current.trim(), timestamp: Date.now() });
+              currentAITextRef.current = "";
+            }
+            setStatus("listening");
+            setIsMuted(true);
+            startPulseAnimation();
+          } else if (data.type === "conversation.item.input_audio_transcription.completed") {
+            const transcript = data.transcript?.trim();
+            if (transcript) {
+              transcriptRef.current.push({ role: "user", text: transcript, timestamp: Date.now() });
+              userTurnCountRef.current += 1;
+              if (userTurnCountRef.current >= 8) markStoryCompleted(story.id);
+            }
+          } else if (data.type === "error") {
+            console.error("OpenAI WS error:", data.error);
+          }
+        } catch (e) {
+          // Non-JSON, ignore
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("WebSocket closed");
+        setIsSessionActive(false);
+        setStatus("error");
+        stopPulseAnimation();
+      };
+
+      ws.onerror = (err) => {
+        console.error("WebSocket error:", err);
+        setStatus("error");
+      };
 
     } catch (error) {
       console.error("Connection error:", error);
       setStatus("error");
-      Alert.alert(
-        "Connection Error",
-        "Could not connect to StoryLingo. Please try again."
-      );
+      Alert.alert("Connection Error", "Could not connect to StoryLingo. Please try again.");
     }
-  }, [story, startPulseAnimation, stopPulseAnimation]);
+  }, [story, language, t, startPulseAnimation, stopPulseAnimation, playAudioChunk, addSession, markStoryCompleted]);
 
   const connectToRealtimeNative = useCallback(async () => {
     // For native mobile, show a message that this feature works best on web
@@ -536,28 +450,13 @@ export default function SessionScreen() {
   }, []);
 
   const sendMessageToAI = (message: string) => {
-    const dc = dataChannelRef.current;
-    if (dc && dc.readyState === "open") {
-      const createItemEvent = {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
         type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: message,
-            },
-          ],
-        },
-      };
-      dc.send(JSON.stringify(createItemEvent));
-      console.log("Sent message to AI:", message);
-      
-      const responseEvent = {
-        type: "response.create",
-      };
-      dc.send(JSON.stringify(responseEvent));
+        item: { type: "message", role: "user", content: [{ type: "input_text", text: message }] },
+      }));
+      ws.send(JSON.stringify({ type: "response.create" }));
     }
   };
 
@@ -576,18 +475,15 @@ export default function SessionScreen() {
 
   const handleTalkPressIn = () => {
     talkButtonScale.value = withSpring(0.95, { damping: 15 });
-    // Push-to-talk: unmute mic while finger is held down (only during child's turn)
     if (isSessionActive && status !== "speaking" && !isPaused) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = true; });
-      }
+      isSendingAudioRef.current = true;
       setIsMuted(false);
       setIsHolding(true);
-      // Clear stale audio, then re-enable VAD so OpenAI can detect speech
-      if (dataChannelRef.current?.readyState === "open") {
-        dataChannelRef.current.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-        dataChannelRef.current.send(JSON.stringify({
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+        ws.send(JSON.stringify({
           type: "session.update",
           session: {
             turn_detection: {
@@ -604,21 +500,15 @@ export default function SessionScreen() {
 
   const handleTalkPressOut = () => {
     talkButtonScale.value = withSpring(1, { damping: 15 });
-    // Push-to-talk: mute mic when finger is released
     if (isSessionActive && isHolding) {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = false; });
-      }
+      isSendingAudioRef.current = false;
       setIsMuted(true);
       setIsHolding(false);
-      // Commit audio buffer so OpenAI processes what was said, then disable VAD
-      if (dataChannelRef.current?.readyState === "open") {
-        dataChannelRef.current.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        dataChannelRef.current.send(JSON.stringify({
-          type: "session.update",
-          session: { turn_detection: null },
-        }));
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        ws.send(JSON.stringify({ type: "session.update", session: { turn_detection: null } }));
       }
     }
   };
@@ -639,28 +529,15 @@ export default function SessionScreen() {
   };
 
   const stopSession = () => {
-    // Close WebRTC connection
-    if (pcRef.current) {
-      pcRef.current.close();
-      pcRef.current = null;
-    }
-    // Stop local audio stream
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => track.stop());
-      localStreamRef.current = null;
-    }
-    // Stop audio playback
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.srcObject = null;
-      audioRef.current = null;
-    }
-    // Reset state
+    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    if (scriptProcessorRef.current) { scriptProcessorRef.current.disconnect(); scriptProcessorRef.current = null; }
+    if (audioContextRef.current) { audioContextRef.current.close(); audioContextRef.current = null; }
+    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach(t => t.stop()); localStreamRef.current = null; }
+    isSendingAudioRef.current = false;
     setIsSessionActive(false);
     setStatus("idle");
     setIsMuted(false);
     setIsPaused(false);
-    dataChannelRef.current = null;
     stopPulseAnimation();
   };
 

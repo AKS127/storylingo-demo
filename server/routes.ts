@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "node:http";
+import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 import { getLanguageConfig } from "./languageConfig";
 import * as fs from "fs";
 import * as path from "path";
@@ -142,6 +143,48 @@ ${storyBeatsFormatted}`;
   });
 
   const httpServer = createServer(app);
+
+  // WebSocket proxy — client connects here, server proxies to OpenAI Realtime WS
+  const wss = new WebSocketServer({ noServer: true });
+  httpServer.on("upgrade", (request: any, socket: any, head: any) => {
+    const url = new URL(request.url!, `http://localhost`);
+    if (url.pathname !== "/api/realtime") {
+      socket.destroy();
+      return;
+    }
+    const token = url.searchParams.get("token");
+    if (!token) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
+    const openaiWs = new NodeWebSocket(
+      "wss://api.openai.com/v1/realtime?model=gpt-realtime",
+      { headers: { Authorization: `Bearer ${token}`, "OpenAI-Beta": "realtime=v1" } }
+    );
+
+    openaiWs.on("open", () => {
+      console.log("Proxying to OpenAI Realtime WS");
+      wss.handleUpgrade(request, socket, head, (clientWs) => {
+        clientWs.on("message", (data: any) => {
+          if (openaiWs.readyState === NodeWebSocket.OPEN) openaiWs.send(data);
+        });
+        openaiWs.on("message", (data: any) => {
+          if (clientWs.readyState === NodeWebSocket.OPEN) clientWs.send(data.toString());
+        });
+        openaiWs.on("close", () => clientWs.close());
+        clientWs.on("close", () => openaiWs.close());
+        openaiWs.on("error", (err) => { console.error("OpenAI WS error:", err); clientWs.close(); });
+      });
+    });
+
+    openaiWs.on("error", (err) => {
+      console.error("Failed to connect to OpenAI WS:", err);
+      socket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+      socket.destroy();
+    });
+  });
 
   return httpServer;
 }
