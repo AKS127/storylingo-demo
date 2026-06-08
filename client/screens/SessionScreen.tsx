@@ -381,6 +381,7 @@ export default function SessionScreen() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          console.log("[OpenAI]", data.type, data.type === "response.audio.delta" ? `(${data.delta?.length} chars)` : "");
 
           if (data.type === "response.audio.delta") {
             playAudioChunk(data.delta);
