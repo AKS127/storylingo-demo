@@ -481,7 +481,7 @@ export default function SessionScreen() {
 
       // Step 3: Exchange SDP with OpenAI Realtime API
       // Using the correct GA endpoint: /v1/realtime/calls
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
+      const sdpResponse = await fetch("https://api.openai.com/v1/realtime?model=gpt-5.5", {
         method: "POST",
         body: offer.sdp,
         headers: {
