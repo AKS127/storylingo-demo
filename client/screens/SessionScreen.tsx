@@ -383,13 +383,13 @@ export default function SessionScreen() {
           const data = JSON.parse(event.data);
           console.log("[OpenAI]", data.type, data.type === "response.audio.delta" ? `(${data.delta?.length} chars)` : "");
 
-          if (data.type === "response.audio.delta") {
+          if (data.type === "response.output_audio.delta") {
             playAudioChunk(data.delta);
             setStatus("speaking");
             isSendingAudioRef.current = false;
             setIsMuted(true);
             stopPulseAnimation();
-          } else if (data.type === "response.audio_transcript.delta") {
+          } else if (data.type === "response.output_audio_transcript.delta") {
             currentAITextRef.current += data.delta || "";
             setStatus("speaking");
             isSendingAudioRef.current = false;
