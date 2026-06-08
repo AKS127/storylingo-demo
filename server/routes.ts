@@ -44,11 +44,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Get language-specific configuration
       const langConfig = getLanguageConfig(language || "en");
 
-      if (!langConfig.promptId) {
-        return res.status(500).json({
-          error: "OPENAI_PROMPT_ID environment variable is not set. See .env.example for setup instructions.",
-        });
-      }
 
       // Format story beats as a numbered list string
       const storyBeatsFormatted = macroBeats
@@ -70,7 +65,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log("Story Beats:", storyBeatsFormatted);
       console.log("Language:", language || "en");
       console.log("Language Config:", langConfig.languageName);
-      console.log("Prompt ID:", langConfig.promptId);
+
 
       // Build inline instructions from the prompt template
       const instructions = `You are a voice-first, interactive storyteller for children aged 3–10. The child speaks, not types. Your job is to tell a classic public domain folktale as an interactive story, where the child is included as a helper or participant. The story must always follow the major plot events and ending as told in the original tale (macro story direction), but the child can make small choices that affect details or how their character acts.
@@ -119,7 +114,6 @@ ${storyBeatsFormatted}`;
               type: "realtime",
               model: "gpt-realtime",
               instructions,
-              voice: "alloy",
             },
           }),
         }
