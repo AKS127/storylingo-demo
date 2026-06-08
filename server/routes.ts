@@ -161,7 +161,7 @@ ${storyBeatsFormatted}`;
 
     const openaiWs = new NodeWebSocket(
       "wss://api.openai.com/v1/realtime?model=gpt-realtime",
-      { headers: { Authorization: `Bearer ${token}`, "OpenAI-Beta": "realtime=v1" } }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     openaiWs.on("open", () => {
