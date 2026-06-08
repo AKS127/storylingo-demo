@@ -355,16 +355,6 @@ export default function SessionScreen() {
         // Ensure AudioContext is running (browser may suspend it)
         if (audioCtx.state === "suspended") audioCtx.resume();
 
-        // Configure session for audio I/O
-        ws.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            type: "realtime",
-            input_audio_format: "pcm16",
-            output_audio_format: "pcm16",
-          },
-        }));
-
         // Initiate story
         const storyTranslation = getStoryTranslation(t, story.id);
         const languageInstruction = t.voiceAgent.languageInstruction;
@@ -491,17 +481,6 @@ export default function SessionScreen() {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-        ws.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.85,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 1000,
-            },
-          },
-        }));
       }
     }
   };
@@ -516,7 +495,6 @@ export default function SessionScreen() {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        ws.send(JSON.stringify({ type: "session.update", session: { turn_detection: null } }));
       }
     }
   };
