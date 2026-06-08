@@ -168,7 +168,7 @@ ${storyBeatsFormatted}`;
       console.log("Proxying to OpenAI Realtime WS");
       wss.handleUpgrade(request, socket, head, (clientWs) => {
         clientWs.on("message", (data: any) => {
-          if (openaiWs.readyState === NodeWebSocket.OPEN) openaiWs.send(data);
+          if (openaiWs.readyState === NodeWebSocket.OPEN) openaiWs.send(data.toString());
         });
         openaiWs.on("message", (data: any) => {
           if (clientWs.readyState === NodeWebSocket.OPEN) clientWs.send(data.toString());
