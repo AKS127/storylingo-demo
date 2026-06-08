@@ -346,14 +346,12 @@ export default function SessionScreen() {
       ws.onopen = () => {
         console.log("WebSocket connected");
 
-        // Disable VAD by default — push-to-talk only
+        // Minimal session config — just set audio formats
         ws.send(JSON.stringify({
           type: "session.update",
           session: {
-            turn_detection: null,
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
-            input_audio_transcription: { model: "whisper-1" },
           },
         }));
 
@@ -412,7 +410,7 @@ export default function SessionScreen() {
               if (userTurnCountRef.current >= 8) markStoryCompleted(story.id);
             }
           } else if (data.type === "error") {
-            console.error("OpenAI WS error:", data.error);
+            console.error("OpenAI WS error:", JSON.stringify(data.error));
           }
         } catch (e) {
           // Non-JSON, ignore
