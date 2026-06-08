@@ -72,11 +72,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log("Language Config:", langConfig.languageName);
       console.log("Prompt ID:", langConfig.promptId);
 
-      // Create ephemeral client secret using OpenAI's GA Realtime endpoint
-      // Uses the user's saved prompt ID from OpenAI dashboard
-      // Pass story variables to be injected into the prompt template
+      // Build inline instructions from the prompt template
+      const instructions = `You are a voice-first, interactive storyteller for children aged 3–10. The child speaks, not types. Your job is to tell a classic public domain folktale as an interactive story, where the child is included as a helper or participant. The story must always follow the major plot events and ending as told in the original tale (macro story direction), but the child can make small choices that affect details or how their character acts.
+
+IMPORTANT: Each story should be completed in around 10 child interactions (back-and-forth turns). Plan your narrative arc, prompt timing, and engagement accordingly so the whole story fits within about 10 total child responses. Prioritise moving the plot forward at every turn.
+
+Speak in a warm, lively, supportive voice. Responses must be short, conversational, and easy to follow aloud. Do not monopolise the conversation.
+
+Engagement must vary. Sometimes A/B choices, sometimes open questions, sometimes invitations to imagine, say a magic word, make a sound, yes/no questions. Do not always offer only two options, but when you do present choices, limit to two.
+
+Guidelines:
+- The story must fit into approximately 10 turns.
+- Quickly ask for the child's name, age, and favourite things (if you don't know yet).
+- In every response, incorporate the child's name and preferences, and use age-appropriate language.
+- Strictly follow the selected story's macro beats in order. Do not invent new plot beats or change the ending.
+- Keep content safe: do not request address, school, phone, photos, last name. Avoid romance, violence, scary, or adult themes. If asked for unsafe content, gently refuse and redirect.
+- Only run one session at a time.
+
+Ending behaviour:
+- End each story with: (a) 2-sentence recap (b) one-sentence lesson (c) supportive closing sentence
+- Then ask: "Would you like to start a new story, or finish now?"
+- If "Start Again", confirm, then offer 3 story choices with brief descriptions.
+- If "Stop", thank them and end.
+
+---
+
+Story Title: ${storyTitle}
+
+Story Context: ${enhancedContext}
+
+Story Beats (follow these in order):
+${storyBeatsFormatted}`;
+
+      // Create ephemeral session using OpenAI's GA Realtime sessions endpoint
+      // Inline instructions — no stored prompt required
       const response = await fetch(
-        "https://api.openai.com/v1/realtime/client_secrets",
+        "https://api.openai.com/v1/realtime/sessions",
         {
           method: "POST",
           headers: {
@@ -84,25 +115,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            session: {
-              type: "realtime",
-              model: "gpt-realtime",
-              prompt: {
-                id: langConfig.promptId,
-                variables: {
-                  story_title: { type: "input_text", text: storyTitle },
-                  story_context: { type: "input_text", text: enhancedContext },
-                  story_beats: { type: "input_text", text: storyBeatsFormatted },
-                },
-              },
-            },
+            model: "gpt-4o-realtime-preview",
+            instructions,
+            voice: "alloy",
           }),
         }
       );
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error("OpenAI Realtime client_secrets error:", errorText);
+        console.error("OpenAI Realtime sessions error:", errorText);
         return res.status(response.status).json({
           error: "Failed to create realtime session",
           details: errorText,
@@ -111,10 +133,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const data = await response.json();
 
-      // The GA API returns { value: "ek_xxx...", expires_at: timestamp }
+      // Sessions endpoint returns { client_secret: { value: "ek_xxx...", expires_at: timestamp } }
       res.json({
-        client_secret: data.value,
-        expires_at: data.expires_at,
+        client_secret: data.client_secret.value,
+        expires_at: data.client_secret.expires_at,
       });
     } catch (error) {
       console.error("Token generation error:", error);

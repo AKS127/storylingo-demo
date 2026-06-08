@@ -493,7 +493,7 @@ export default function SessionScreen() {
       });
 
       // Step 3: Exchange SDP with OpenAI Realtime API
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime?model=gpt-realtime", {
+      const sdpResponse = await fetch("https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview", {
         method: "POST",
         body: pc.localDescription?.sdp ?? offer.sdp,
         headers: {
