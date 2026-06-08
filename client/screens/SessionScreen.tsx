@@ -245,6 +245,7 @@ export default function SessionScreen() {
   const playAudioChunk = useCallback((base64: string) => {
     const audioCtx = audioContextRef.current;
     if (!audioCtx) return;
+    if (audioCtx.state === "suspended") audioCtx.resume();
     try {
       const binary = atob(base64);
       const bytes = new Uint8Array(binary.length);
@@ -332,8 +333,13 @@ export default function SessionScreen() {
         const base64 = btoa(String.fromCharCode(...new Uint8Array(int16.buffer)));
         ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: base64 }));
       };
+      // Connect through a silent gain node — ScriptProcessorNode requires graph
+      // connection to fire onaudioprocess, but we don't want mic audio in speakers
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
       source.connect(processor);
-      processor.connect(audioCtx.destination);
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
       // Step 4: Connect via server-side WebSocket proxy
       const wsUrl = new URL("/api/realtime", baseUrl);
@@ -346,10 +352,14 @@ export default function SessionScreen() {
       ws.onopen = () => {
         console.log("WebSocket connected");
 
-        // Minimal session config — just set audio formats
+        // Ensure AudioContext is running (browser may suspend it)
+        if (audioCtx.state === "suspended") audioCtx.resume();
+
+        // Configure session for audio I/O
         ws.send(JSON.stringify({
           type: "session.update",
           session: {
+            modalities: ["audio", "text"],
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
           },
