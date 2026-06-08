@@ -104,10 +104,10 @@ Story Context: ${enhancedContext}
 Story Beats (follow these in order):
 ${storyBeatsFormatted}`;
 
-      // Create ephemeral session using OpenAI's GA Realtime sessions endpoint
-      // Inline instructions — no stored prompt required
+      // Create ephemeral client secret using OpenAI's client_secrets endpoint
+      // Uses gpt-realtime model with inline instructions via the system field
       const response = await fetch(
-        "https://api.openai.com/v1/realtime/sessions",
+        "https://api.openai.com/v1/realtime/client_secrets",
         {
           method: "POST",
           headers: {
@@ -115,16 +115,19 @@ ${storyBeatsFormatted}`;
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: "gpt-4o-realtime-preview",
-            instructions,
-            voice: "alloy",
+            session: {
+              type: "realtime",
+              model: "gpt-realtime",
+              instructions,
+              voice: "alloy",
+            },
           }),
         }
       );
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error("OpenAI Realtime sessions error:", errorText);
+        console.error("OpenAI Realtime client_secrets error:", errorText);
         return res.status(response.status).json({
           error: "Failed to create realtime session",
           details: errorText,
@@ -133,10 +136,10 @@ ${storyBeatsFormatted}`;
 
       const data = await response.json();
 
-      // Sessions endpoint returns { client_secret: { value: "ek_xxx...", expires_at: timestamp } }
+      // client_secrets endpoint returns { value: "ek_xxx...", expires_at: timestamp }
       res.json({
-        client_secret: data.client_secret.value,
-        expires_at: data.client_secret.expires_at,
+        client_secret: data.value,
+        expires_at: data.expires_at,
       });
     } catch (error) {
       console.error("Token generation error:", error);
